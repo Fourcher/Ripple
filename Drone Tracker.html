@@ -103,7 +103,7 @@
     </div>
 
     <!-- Load the Google Maps JavaScript API -->
-    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDqE6NKJnb_GqY2fhTx8TlqxTXUV_bKLs8"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?key=YOURAPIKEY"></script>
     <script>
         var map;
         var userMarker;
@@ -728,7 +728,7 @@
         function loadScript() {
             // Include the geometry library
             var script = document.createElement("script");
-            script.src = "https://maps.googleapis.com/maps/api/js?key=AIzaSyDqE6NKJnb_GqY2fhTx8TlqxTXUV_bKLs8&libraries=geometry&callback=initMap";
+            script.src = "https://maps.googleapis.com/maps/api/js?key=YOURAPIKEY&libraries=geometry&callback=initMap";
             document.body.appendChild(script);
         }
         window.onload = loadScript;
