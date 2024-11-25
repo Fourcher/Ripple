@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Drone Tracker</title>
+    <style>
+        /* Set the size of the map div */
+        #map {
+            height: 500px;
+            width: 100%;
+        }
+        /* Style for input boxes and button */
+        #controls {
+            margin-bottom: 10px;
+        }
+        #controls label {
+            display: inline-block;
+            margin-right: 10px;
+        }
+        #controls input {
+            width: 80px;
+        }
+        .gm-style-iw-chr {
+            display: none;
+        }
+        
+        .console-container {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+            gap: 20px;
+        }
+        
+        .console {
+            flex: 1;
+            padding: 15px;
+            border-radius: 5px;
+            color: white;
+            font-weight: bold;
+            text-align: center;
+        }
+        
+        .console-blue { background-color: #4285F4; }
+        .console-green { background-color: #34A853; }
+        .console-yellow { background-color: #FBBC05; color: black; }
+        
+        .notification-column {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .notification-history {
+            max-height: 300px;
+            overflow-y: auto;
+            border-radius: 5px;
+            padding: 10px;
+            background: rgba(0,0,0,0.1);
+        }
+
+        .history-entry {
+            padding: 5px;
+            margin-bottom: 5px;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .priority-alert {
+            background-color: #ff000033;
+            border: 2px solid #ff0000;
+        }
+    </style>
+</head>
+<body>
+    <h3>Drone Tracker</h3>
+    <div id="controls">
+        <label>Drone Speed (mph): <input type="text" id="drone-speed" placeholder="e.g., 30" value="30"></label>
+        <button onclick="updateMap()">Update Map</button>
+        <button onclick="randomizeDrone()">Randomize</button>
+        <button id="playButton" onclick="togglePlay()">Play</button>
+        <button onclick="reportDroneSighting()">Spot</button>
+    </div>
+    <div id="map"></div>
+    
+    <div class="console-container">
+        <div class="notification-column">
+            <div id="console1" class="console console-blue">
+                NO DRONE SPOTTED
+            </div>
+            <div id="history1" class="notification-history console-blue"></div>
+        </div>
+        <div class="notification-column">
+            <div id="console2" class="console console-green">
+                NO DRONE SPOTTED
+            </div>
+            <div id="history2" class="notification-history console-green"></div>
+        </div>
+        <div class="notification-column">
+            <div id="console3" class="console console-yellow">
+                NO DRONE SPOTTED
+            </div>
+            <div id="history3" class="notification-history console-yellow"></div>
+        </div>
+    </div>
+
+    <!-- Load the Google Maps JavaScript API -->
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDqE6NKJnb_GqY2fhTx8TlqxTXUV_bKLs8"></script>
+    <script>
+        var map;
+        var userMarker;
+        var user2Marker;
+        var user3Marker;
+        var droneMarker;
+        var line;
+        var circles = [];
+        var isPlaying = false;
+        var movementInterval;
+        var currentBearing = 0;
+        var lastUpdateTime = 0;
+        var userLat = 40.7128;
+        var userLng = -74.0060;
+        var droneLat = 40.7128;
+        var droneLng = -74.0060;
+        var user2Position = {lat: 40.7128, lng: -74.0060};
+        var user3Position = {lat: 40.7128, lng: -74.0060};
+        const UPDATE_INTERVAL = 1000; // milliseconds between updates
+        var geocoder;
+        var lastSpotTime = null;
+        var etaInfoWindow; // Add this with other global variables
+        var spotHistory = [];
+        var dangerCone = null;
+        var spotMarkers = [];
+        var proximityCircle = null; // Add to global variables
+
+        const WATER_POINTS = [
+            {lat: 40.7128, lng: -74.0060, name: 'New York Harbor'},
+            {lat: 40.6892, lng: -74.0445, name: 'Upper Bay'},
+            {lat: 40.7614, lng: -73.9776, name: 'East River'},
+            {lat: 40.8234, lng: -73.9478, name: 'Harlem River'},
+            {lat: 40.7005, lng: -74.0149, name: 'Hudson River'}
+            // Add more water points as needed
+        ];
+
+        function isNearWater(position, minDistance = 0.01) { // roughly 1km
+            return WATER_POINTS.some(water => {
+                const dx = position.lat - water.lat;
+                const dy = position.lng - water.lng;
+                return Math.sqrt(dx * dx + dy * dy) < minDistance;
+            });
+        }
+
+        function getClosestAddress(position) {
+            return new Promise((resolve) => {
+                geocoder.geocode({ location: position }, (results, status) => {
+                    if (status === 'OK' && results[0]) {
+                        const location = results[0].geometry.location;
+                        resolve({
+                            lat: location.lat(),
+                            lng: location.lng()
+                        });
+                    } else {
+                        resolve(position); // fallback to original position
+                    }
+                });
+            });
+        }
+
+        async function getRandomPosition() {
+            const mileDegree = 0.0145;
+            const minRadius = 1 * mileDegree; // minimum 1 mile from user 1
+            const maxRadius = 5 * mileDegree; // maximum 5 miles from user 1
+            
+            // Generate random angle in northern hemisphere (between -90° and 90°)
+            const angle = (Math.random() * Math.PI) - (Math.PI/2); // -90° to 90°
+            
+            // Generate random distance between min and max radius
+            const distance = minRadius + (Math.random() * (maxRadius - minRadius));
+            
+            // Calculate new position using polar coordinates
+            let newLat = userLat + (distance * Math.cos(angle));
+            let newLng = userLng + (distance * Math.sin(angle));
+
+            // If in water, move position east
+            if (isNearWater({lat: newLat, lng: newLng})) {
+                newLng += 0.02;
+            }
+            
+            return {
+                lat: newLat,
+                lng: newLng
+            };
+        }
+
+        function initMap() {
+            // Initial map center (arbitrary starting point)
+            var initialPosition = {lat: 40.7128, lng: -74.0060}; // Default to New York City
+
+            // Create the map
+            map = new google.maps.Map(document.getElementById('map'), {
+                zoom: 12,
+                center: initialPosition,
+                mapTypeId: 'satellite'
+            });
+
+            // Wait for map to be fully loaded before creating markers
+            google.maps.event.addListenerOnce(map, 'idle', function() {
+                // Create markers once
+                userMarker = new google.maps.Marker({
+                    position: initialPosition,
+                    map: map,
+                    title: 'Your Location',
+                    icon: 'http://maps.google.com/mapfiles/ms/icons/blue-dot.png'
+                });
+
+                user2Marker = new google.maps.Marker({
+                    position: initialPosition,
+                    map: map,
+                    title: 'User 2',
+                    icon: 'http://maps.google.com/mapfiles/ms/icons/green-dot.png'
+                });
+
+                user3Marker = new google.maps.Marker({
+                    position: initialPosition,
+                    map: map,
+                    title: 'User 3',
+                    icon: 'http://maps.google.com/mapfiles/ms/icons/yellow-dot.png'
+                });
+
+                droneMarker = new google.maps.Marker({
+                    position: initialPosition,
+                    map: map,
+                    title: 'Drone Location',
+                    icon: 'eye-32x32.png'
+                });
+
+                // Create line once
+                line = new google.maps.Polyline({
+                    map: map,
+                    geodesic: true,
+                    strokeColor: '#FF0000',
+                    strokeOpacity: 1.0,
+                    strokeWeight: 2
+                });
+
+                // Create ETA InfoWindow once
+                etaInfoWindow = new google.maps.InfoWindow();
+
+                geocoder = new google.maps.Geocoder();
+                detectLocation();
+            });
+        }
+
+        function detectLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    async function(position) {
+                        userLat = position.coords.latitude;
+                        userLng = position.coords.longitude;
+
+                        // Generate random drone location within 5 miles
+                        var mileDegree = 0.0145;
+                        var maxOffset = 5 * mileDegree;
+                        droneLat = userLat + (Math.random() - 0.5) * maxOffset;
+                        droneLng = userLng + (Math.random() - 0.5) * maxOffset;
+
+                        // Generate random positions for user2 and user3 (within 8 miles of drone)
+                        user2Position = await getRandomPosition(droneLat, droneLng, 8);
+                        user3Position = await getRandomPosition(droneLat, droneLng, 8);
+
+                        updateMap();
+                        map.setCenter({lat: userLat, lng: userLng});
+                    },
+                    function(error) {
+                        console.error('Geolocation error:', error);
+                        alert('Error detecting your location. Please enter it manually.');
+                    }
+                );
+            } else {
+                alert('Geolocation is not supported by your browser.');
+            }
+        }
+
+        function updateMap(fit = true) {
+            // Get the coordinates from the input boxes
+            var droneSpeed = parseFloat(document.getElementById('drone-speed').value);
+
+            // Validate the coordinates and speed
+            if (isNaN(userLat) || isNaN(userLng) || isNaN(droneLat) || isNaN(droneLng) || isNaN(droneSpeed) || droneSpeed <= 0) {
+                alert('Please enter valid coordinates and drone speed.');
+                return;
+            }
+
+            var userPosition = {lat: userLat, lng: userLng};
+            var dronePosition = {lat: droneLat, lng: droneLng};
+
+            // Update marker positions instead of recreating them
+            userMarker.setPosition(userPosition);
+            user2Marker.setPosition(user2Position);
+            user3Marker.setPosition(user3Position);
+            droneMarker.setPosition(dronePosition);
+
+            // Update line path
+            line.setPath([userPosition, dronePosition]);
+
+            // Clear only circles
+            if (circles.length > 0) {
+                circles.forEach(function(circle) {
+                    if (circle !== proximityCircle) {
+                        circle.setMap(null);
+                    }
+                });
+                circles = circles.filter(circle => circle === proximityCircle);
+            }
+
+            // Create bounds object
+            var bounds = new google.maps.LatLngBounds();
+            bounds.extend(userPosition);
+            bounds.extend(user2Position);
+            bounds.extend(user3Position);
+            bounds.extend(dronePosition);
+
+            // Draw reference timing rings/radii around the drone
+            var times = [1, 5, 10]; // in minutes
+            times.forEach(function(time) {
+                var distance = (droneSpeed * time) * 1609.34 / 60; // Convert mph to meters per minute
+
+                var circle = new google.maps.Circle({
+                    map: map,
+                    center: dronePosition,
+                    radius: distance, // in meters
+                    fillColor: '#00AAFF',
+                    fillOpacity: 0.0,
+                    strokeColor: '#00AAFF',
+                    strokeOpacity: 0.8,
+                    strokeWeight: 2,
+                    clickable: false
+                });
+
+                // Add label for each circle
+                var labelPosition = google.maps.geometry.spherical.computeOffset(dronePosition, distance, 90);
+                
+                // Extend bounds to include the label position
+                bounds.extend(labelPosition);
+                
+                // Also extend bounds to include the opposite side of the circle
+                // var oppositePosition = google.maps.geometry.spherical.computeOffset(dronePosition, distance, 270);
+                // bounds.extend(oppositePosition);
+
+                var label = new google.maps.InfoWindow({
+                    content: time + ' min',
+                    position: labelPosition,
+                    disableAutoPan: true   // Prevent map from panning when InfoWindow opens
+                });
+                label.open(map);
+                circles.push(circle);
+                circles.push(label);
+            });
+
+            // Now fit the bounds after all points have been added
+            if (fit)
+                map.fitBounds(bounds);
+
+            // Calculate and display the ETA from drone to user
+            var distanceBetween = google.maps.geometry.spherical.computeDistanceBetween(
+                new google.maps.LatLng(userPosition),
+                new google.maps.LatLng(dronePosition)
+            ); // in meters
+
+            var etaMinutes = (distanceBetween / 1609.34) / droneSpeed * 60; // Convert meters to miles, then calculate ETA in minutes
+
+            var etaText = 'ETA: ' + etaMinutes.toFixed(2) + ' minutes';
+
+            // Update ETA InfoWindow content and position
+            etaInfoWindow.setContent(etaText);
+            etaInfoWindow.open(map, userMarker);
+
+            // Check for proximity alerts
+            checkProximityAlert(dronePosition, droneSpeed);
+        }
+
+        function calculateCenterPoint(positions) {
+            const totalLat = positions.reduce((sum, pos) => sum + pos.lat, 0);
+            const totalLng = positions.reduce((sum, pos) => sum + pos.lng, 0);
+            return {
+                lat: totalLat / positions.length,
+                lng: totalLng / positions.length
+            };
+        }
+
+        async function randomizeDrone() {
+            // Clear existing spot markers and history
+            spotMarkers.forEach(marker => marker.setMap(null));
+            spotMarkers = [];
+            spotHistory = [];
+            
+            // Set random speed between 30 and 100 mph
+            const randomSpeed = Math.floor(Math.random() * 71) + 30; // 71 is the range (100-30+1), 30 is the minimum
+            document.getElementById('drone-speed').value = randomSpeed;
+
+            const mileDegree = 0.0145;
+            const minRadius = 0.5 * mileDegree; // minimum 0.5 miles
+            const maxRadius = 3 * mileDegree; // maximum 3 miles
+            
+            // Generate random angle in southern half (between 90° and 270°)
+            const angle = Math.PI + (Math.random() * Math.PI); // 180° to 360°
+            
+            // Generate random distance between min and max radius
+            const distance = minRadius + (Math.random() * (maxRadius - minRadius));
+            
+            // Calculate new drone position using polar coordinates
+            droneLat = userLat + (distance * Math.cos(angle));
+            droneLng = userLng + (distance * Math.sin(angle));
+
+            // Generate new user positions north of user 1
+            user2Position = await getRandomPosition();
+            user3Position = await getRandomPosition();
+            
+            // Calculate center point between all users
+            const centerPoint = calculateCenterPoint([
+                {lat: userLat, lng: userLng},
+                user2Position,
+                user3Position
+            ]);
+            
+            // Set bearing towards center point
+            currentBearing = google.maps.geometry.spherical.computeHeading(
+                {lat: droneLat, lng: droneLng},
+                centerPoint
+            );
+            
+            lastSpotTime = null;
+            updateMap();
+        }
+
+        function getBearingText(bearing) {
+            const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+            return directions[Math.abs(Math.round(bearing / 45)) % 8];
+        }
+
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            const button = document.getElementById('playButton');
+            if (isPlaying) {
+                button.textContent = 'Stop';
+                startDroneMovement();
+            } else {
+                button.textContent = 'Play';
+                stopDroneMovement();
+            }
+        }
+
+        function startDroneMovement() {
+            // Initialize random direction if starting fresh
+            if (!currentBearing) {
+                currentBearing = Math.random() * 360;
+            }
+            movementInterval = setInterval(updateDronePosition, UPDATE_INTERVAL);
+        }
+
+        function stopDroneMovement() {
+            clearInterval(movementInterval);
+        }
+
+        function updateDronePosition() {
+            const now = Date.now();
+            const droneSpeed = parseFloat(document.getElementById('drone-speed').value);
+            const mileDegree = 0.0145; // approximately 1 mile in degrees
+            const targetThreshold = 0.1 * mileDegree; // 0.1 miles in degrees
+
+            // Calculate center point between all users
+            const centerPoint = calculateCenterPoint([
+                {lat: userLat, lng: userLng},
+                user2Position,
+                user3Position
+            ]);
+            
+            // Check if drone has reached the center point
+            const distanceToCenter = google.maps.geometry.spherical.computeDistanceBetween(
+                {lat: droneLat, lng: droneLng},
+                centerPoint
+            );
+            
+            // If within 0.1 miles of center, switch target to user 1
+            if (distanceToCenter < (targetThreshold * 111000)) { // Convert degrees to meters (111km per degree)
+                currentBearing = google.maps.geometry.spherical.computeHeading(
+                    {lat: droneLat, lng: droneLng},
+                    {lat: userLat, lng: userLng}
+                );
+            } else {
+                currentBearing = google.maps.geometry.spherical.computeHeading(
+                    {lat: droneLat, lng: droneLng},
+                    centerPoint
+                );
+            }
+
+            // Calculate new position using bearing
+            const degreesPerHour = (droneSpeed * 1.60934) / 111;
+            const degreesPerInterval = degreesPerHour * (UPDATE_INTERVAL / (1000 * 60 * 60));
+            const distance = degreesPerInterval;
+
+            // Calculate new position based on speed and bearing
+            const newLat = droneLat + distance * Math.cos(currentBearing * Math.PI / 180);
+            const newLng = droneLng + distance * Math.sin(currentBearing * Math.PI / 180);
+
+            // Update drone position
+            droneLat = newLat;
+            droneLng = newLng;
+
+            // Update map
+            updateMap(false);
+        }
+
+        // Add new function for reporting drone sighting
+        function reportDroneSighting() {
+            const newSpot = {
+                time: new Date(),
+                position: {lat: droneLat, lng: droneLng}
+            };
+            
+            // Add breadcrumb marker
+            const spotMarker = new google.maps.Marker({
+                position: newSpot.position,
+                map: map,
+                icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    fillColor: '#FF0000',
+                    fillOpacity: 1,
+                    strokeColor: '#FF0000',
+                    strokeWeight: 2,
+                    scale: 7
+                }
+            });
+            spotMarkers.push(spotMarker);
+            
+            // Keep only last 50 markers
+            if (spotMarkers.length > 50) {
+                spotMarkers[0].setMap(null);
+                spotMarkers.shift();
+            }
+            
+            spotHistory.push(newSpot);
+            if (spotHistory.length > 2) spotHistory.shift();
+            
+            lastSpotTime = newSpot.time;
+            updateConsoles();
+            
+            if (spotHistory.length === 2) {
+                const heading = google.maps.geometry.spherical.computeHeading(
+                    spotHistory[0].position,
+                    spotHistory[1].position
+                );
+                drawDangerCone(spotHistory[1].position, heading);
+            }
+        }
+
+        function drawDangerCone(position, heading) {
+            if (dangerCone) dangerCone.setMap(null);
+            
+            const droneSpeed = parseFloat(document.getElementById('drone-speed').value);
+            const maxDistance = (droneSpeed * 10) * 1609.34 / 60; // 10 min distance in meters
+            const immediateRadius = (droneSpeed * 1) * 1609.34 / 60; // 1 min distance in meters
+            
+            // Draw immediate danger radius
+            const dangerRadius = new google.maps.Circle({
+                map: map,
+                center: position,
+                radius: immediateRadius,
+                fillColor: "#FF0000",
+                fillOpacity: 0.2,
+                strokeColor: "#FF0000",
+                strokeOpacity: 1.0,
+                strokeWeight: 2
+            });
+            
+            const coneCoords = [];
+            const angleOffset = 15; // 30° cone (±15° from center)
+            
+            // Draw cone edges with more detail
+            for (let angle = -angleOffset; angle <= angleOffset; angle += 1) {
+                const point = google.maps.geometry.spherical.computeOffset(
+                    position,
+                    maxDistance,
+                    heading + angle
+                );
+                coneCoords.push(point);
+            }
+            
+            // Close the polygon
+            coneCoords.unshift(position);
+            coneCoords.push(position);
+            
+            dangerCone = new google.maps.Polygon({
+                paths: coneCoords,
+                strokeColor: "#FF0000",
+                strokeOpacity: 1.0,
+                strokeWeight: 2,
+                fillColor: "#FF0000",
+                fillOpacity: 0.2,
+                map: map
+            });
+
+            circles.push(dangerRadius); // Add to circles array for cleanup
+            checkUsersInDangerZone(position, heading, immediateRadius);
+        }
+
+        function checkUsersInDangerZone(dronePos, heading, immediateRadius) {
+            const droneSpeed = parseFloat(document.getElementById('drone-speed').value);
+            const maxDistance = (droneSpeed * 10) * 1609.34 / 60; // 10 min distance in meters
+            
+            const users = [
+                {pos: {lat: userLat, lng: userLng}, id: 'console1'},
+                {pos: user2Position, id: 'console2'},
+                {pos: user3Position, id: 'console3'}
+            ];
+            
+            users.forEach(user => {
+                const userHeading = google.maps.geometry.spherical.computeHeading(
+                    dronePos,
+                    user.pos
+                );
+                
+                const distance = google.maps.geometry.spherical.computeDistanceBetween(
+                    dronePos,
+                    user.pos
+                );
+                
+                const angleDiff = Math.abs(((userHeading - heading + 180) % 360) - 180);
+                const inCone = angleDiff <= 15 && distance <= maxDistance; // Must be within both angle AND max distance
+                const inRadius = distance <= immediateRadius;
+                const inDanger = inCone || inRadius;
+                
+                const container = document.getElementById(user.id);
+                const history = document.getElementById(`history${user.id.slice(-1)}`);
+                
+                if (inDanger) {
+                    container.classList.add('priority-alert');
+                    history.classList.add('priority-alert');
+                } else {
+                    container.classList.remove('priority-alert');
+                    history.classList.remove('priority-alert');
+                }
+            });
+        }
+
+        function checkProximityAlert(dronePosition, droneSpeed) {
+            const immediateRadius = (droneSpeed * 1) * 1609.34 / 60; // 1 min distance in meters
+            const users = [
+                {pos: {lat: userLat, lng: userLng}, id: 'console1'},
+                {pos: user2Position, id: 'console2'},
+                {pos: user3Position, id: 'console3'}
+            ];
+
+            let userInRange = false;
+            users.forEach(user => {
+                const distance = google.maps.geometry.spherical.computeDistanceBetween(
+                    dronePosition,
+                    user.pos
+                );
+                if (distance <= immediateRadius) {
+                    userInRange = true;
+                    document.getElementById(user.id).classList.add('priority-alert');
+                } else if (!spotHistory.length) { // Only remove if no direction cone exists
+                    document.getElementById(user.id).classList.remove('priority-alert');
+                }
+            });
+
+            // Update proximity circle
+            if (userInRange) {
+                if (!proximityCircle) {
+                    proximityCircle = new google.maps.Circle({
+                        map: map,
+                        center: dronePosition,
+                        radius: immediateRadius,
+                        fillColor: "#FF0000",
+                        fillOpacity: 0.2,
+                        strokeColor: "#FF0000",
+                        strokeOpacity: 1.0,
+                        strokeWeight: 2
+                    });
+                } else {
+                    proximityCircle.setCenter(dronePosition);
+                    proximityCircle.setRadius(immediateRadius);
+                }
+                circles.push(proximityCircle);
+            } else if (proximityCircle && !spotHistory.length) {
+                proximityCircle.setMap(null);
+                proximityCircle = null;
+            }
+        }
+
+        function updateConsoles() {
+            const droneSpeed = parseFloat(document.getElementById('drone-speed').value);
+            const dronePosition = {lat: droneLat, lng: droneLng};
+            const timeStr = lastSpotTime ? lastSpotTime.toLocaleTimeString() : 'N/A';
+
+            function updateConsole(userPosition, consoleId) {
+                const consoleElement = document.getElementById(consoleId);
+                const historyElement = document.getElementById(`history${consoleId.slice(-1)}`);
+                
+                if (!lastSpotTime) {
+                    consoleElement.innerHTML = 'NO DRONE SPOTTED';
+                    return;
+                }
+
+                const bearing = google.maps.geometry.spherical.computeHeading(userPosition, dronePosition);
+                const distance = google.maps.geometry.spherical.computeDistanceBetween(
+                    new google.maps.LatLng(userPosition),
+                    new google.maps.LatLng(dronePosition)
+                );
+                const etaMinutes = (distance / 1609.34) / droneSpeed * 60;
+                const direction = getBearingText(bearing);
+                
+                const spotText = `DRONE SPOTTED<br>${direction}<br>${etaMinutes.toFixed(1)} min<br>at ${timeStr}`;
+                consoleElement.innerHTML = spotText;
+                
+                // Add to history
+                const historyEntry = document.createElement('div');
+                historyEntry.className = 'history-entry';
+                historyEntry.innerHTML = `SPOTTED: ${direction} - ${timeStr}<br>${etaMinutes.toFixed(1)} min`;
+                historyElement.insertBefore(historyEntry, historyElement.firstChild);
+            }
+            
+            updateConsole({lat: userLat, lng: userLng}, 'console1');
+            updateConsole(user2Position, 'console2');
+            updateConsole(user3Position, 'console3');
+        }
+
+        // Initialize the map
+        function loadScript() {
+            // Include the geometry library
+            var script = document.createElement("script");
+            script.src = "https://maps.googleapis.com/maps/api/js?key=AIzaSyDqE6NKJnb_GqY2fhTx8TlqxTXUV_bKLs8&libraries=geometry&callback=initMap";
+            document.body.appendChild(script);
+        }
+        window.onload = loadScript;
+    </script>
+</body>
+</html>
